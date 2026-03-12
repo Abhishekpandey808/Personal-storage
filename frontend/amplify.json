@@ -1,0 +1,7 @@
+{
+  "ProjectName": "personal-storage",
+  "Version": 1,
+  "Backend": {
+    "Region": "us-east-1"
+  }
+}

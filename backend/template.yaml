@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Personal Cloud Storage Application - SAM Template
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: python3.9
+    Environment:
+      Variables:
+        STORAGE_BUCKET: !Ref StorageBucket
+        COGNITO_USER_POOL_ID: !Ref CognitoUserPool
+        COGNITO_CLIENT_ID: !Ref CognitoUserPoolClient
+        REGION: !Ref AWS::Region
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment stage
+
+Resources:
+  # ─── Cognito User Pool ───────────────────────────────────────────────────────
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "PersonalCloudUserPool-${Stage}"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "PersonalCloudAppClient-${Stage}"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # ─── S3 Storage Bucket ───────────────────────────────────────────────────────
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "personal-cloud-storage-${Stage}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
+  # ─── Lambda Functions ─────────────────────────────────────────────────────────
+  UploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "PersonalStorage-Upload-${Stage}"
+      CodeUri: src/upload/
+      Handler: app.upload_handler
+      Description: Handles file upload to S3
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StorageBucket
+      Events:
+        UploadApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PersonalStorageApi
+            Path: /upload
+            Method: post
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DownloadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "PersonalStorage-Download-${Stage}"
+      CodeUri: src/download/
+      Handler: app.download_handler
+      Description: Handles file download (generates pre-signed URLs)
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref StorageBucket
+      Events:
+        DownloadApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PersonalStorageApi
+            Path: /download
+            Method: get
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "PersonalStorage-Delete-${Stage}"
+      CodeUri: src/delete/
+      Handler: app.delete_handler
+      Description: Handles file deletion from S3
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StorageBucket
+      Events:
+        DeleteApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PersonalStorageApi
+            Path: /delete
+            Method: delete
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  ListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "PersonalStorage-List-${Stage}"
+      CodeUri: src/list/
+      Handler: app.list_handler
+      Description: Lists files for an authenticated user
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref StorageBucket
+      Events:
+        ListApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PersonalStorageApi
+            Path: /files
+            Method: get
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # ─── API Gateway ──────────────────────────────────────────────────────────────
+  PersonalStorageApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "PersonalStorageApi-${Stage}"
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+# ─── Outputs ──────────────────────────────────────────────────────────────────
+Outputs:
+  ApiGatewayUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${PersonalStorageApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Export:
+      Name: !Sub "PersonalStorageApiUrl-${Stage}"
+
+  StorageBucketName:
+    Description: "S3 bucket name for file storage"
+    Value: !Ref StorageBucket
+    Export:
+      Name: !Sub "PersonalStorageBucket-${Stage}"
+
+  CognitoUserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub "PersonalStorageUserPoolId-${Stage}"
+
+  CognitoUserPoolClientId:
+    Description: "Cognito User Pool App Client ID"
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub "PersonalStorageUserPoolClientId-${Stage}"
+
+  Region:
+    Description: "AWS Region"
+    Value: !Ref AWS::Region
